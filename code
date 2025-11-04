@@ -1,0 +1,314 @@
+import cv2
+import numpy as np
+import pytesseract
+import re
+import sympy as sp
+from sympy import symbols, solve, simplify, expand, factor
+from sympy.parsing.sympy_parser import parse_expr
+import matplotlib.pyplot as plt
+from PIL import Image
+import os
+
+class MathSolver:
+    def __init__(self):
+        # Configure Tesseract path (update this path based on your installation)
+        # For Windows: r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+        # For Linux/Mac: usually '/usr/bin/tesseract' or auto-detected
+        # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+        
+        self.supported_operations = ['+', '-', '*', '/', '^', '=', '(', ')']
+        self.variables = symbols('x y z a b c')
+    
+    def preprocess_image(self, image_path):
+        """
+        Preprocess the image to improve OCR accuracy
+        """
+        # Read the image
+        img = cv2.imread(image_path)
+        if img is None:
+            raise ValueError(f"Could not load image from {image_path}")
+        
+        # Convert to grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Apply Gaussian blur to reduce noise
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        
+        # Apply adaptive thresholding
+        thresh = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+            cv2.THRESH_BINARY, 11, 2
+        )
+        
+        # Morphological operations to clean up the image
+        kernel = np.ones((2, 2), np.uint8)
+        cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        
+        # Invert colors (black text on white background)
+        inverted = cv2.bitwise_not(cleaned)
+        
+        # Resize image for better OCR (scale up)
+        height, width = inverted.shape
+        resized = cv2.resize(inverted, (width * 2, height * 2), interpolation=cv2.INTER_CUBIC)
+        
+        return resized
+    
+    def extract_text_from_image(self, image_path):
+        """
+        Extract text from image using Tesseract OCR
+        """
+        try:
+            # Preprocess the image
+            processed_img = self.preprocess_image(image_path)
+            
+            # Configure Tesseract for mathematical expressions
+            config = '--psm 6 -c tessedit_char_whitelist=0123456789+-*/=()^xyzabcXYZABC '
+            
+            # Extract text
+            text = pytesseract.image_to_string(processed_img, config=config)
+            
+            # Clean up the extracted text
+            cleaned_text = self.clean_extracted_text(text)
+            
+            return cleaned_text
+        
+        except Exception as e:
+            print(f"Error extracting text: {e}")
+            return None
+    
+    def clean_extracted_text(self, text):
+        """
+        Clean and normalize the extracted text
+        """
+        # Remove extra whitespace and newlines
+        text = re.sub(r'\s+', ' ', text.strip())
+        
+        # Replace common OCR errors
+        replacements = {
+            '×': '*',
+            '÷': '/',
+            '−': '-',
+            '–': '-',
+            '—': '-',
+            '∗': '*',
+            'X': '*',
+            'x': '*',  # Only if not a variable
+            '|': '1',
+            'O': '0',
+            'o': '0',
+            'I': '1',
+            'l': '1',
+            'S': '5',
+            'Z': '2',
+        }
+        
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        
+        # Handle equation formatting
+        text = re.sub(r'(\d)\s*([a-zA-Z])', r'\1*\2', text)  # 2x -> 2*x
+        text = re.sub(r'([a-zA-Z])\s*(\d)', r'\1*\2', text)  # x2 -> x*2
+        text = re.sub(r'(\))(\()', r')*\2', text)  # )( -> )*(
+        text = re.sub(r'(\d)(\()', r'\1*\2', text)  # 2( -> 2*(
+        text = re.sub(r'(\))(\d)', r'\1*\2', text)  # )2 -> )*2
+        
+        return text
+    
+    def parse_equation(self, equation_text):
+        """
+        Parse the equation and identify the type of problem
+        """
+        equation_text = equation_text.replace(' ', '')
+        
+        # Check if it's an equation (contains =)
+        if '=' in equation_text:
+            return self.solve_equation(equation_text)
+        else:
+            # It's an expression to simplify
+            return self.simplify_expression(equation_text)
+    
+    def solve_equation(self, equation_text):
+        """
+        Solve mathematical equations
+        """
+        try:
+            # Split equation by '='
+            left, right = equation_text.split('=', 1)
+            
+            # Parse both sides
+            left_expr = parse_expr(left)
+            right_expr = parse_expr(right)
+            
+            # Create equation
+            equation = left_expr - right_expr
+            
+            # Find variables in the equation
+            variables = equation.free_symbols
+            
+            if not variables:
+                # No variables, check if equation is true
+                result = simplify(equation)
+                return f"Equation verification: {result == 0}"
+            
+            # Solve for each variable
+            solutions = {}
+            for var in variables:
+                sol = solve(equation, var)
+                solutions[str(var)] = sol
+            
+            return solutions
+        
+        except Exception as e:
+            return f"Error solving equation: {e}"
+    
+    def simplify_expression(self, expression_text):
+        """
+        Simplify mathematical expressions
+        """
+        try:
+            expr = parse_expr(expression_text)
+            simplified = simplify(expr)
+            expanded = expand(expr)
+            factored = factor(expr)
+            
+            return {
+                'original': str(expr),
+                'simplified': str(simplified),
+                'expanded': str(expanded),
+                'factored': str(factored)
+            }
+        
+        except Exception as e:
+            return f"Error simplifying expression: {e}"
+    
+    def evaluate_expression(self, expression_text):
+        """
+        Evaluate numerical expressions
+        """
+        try:
+            # Replace ^ with ** for Python exponentiation
+            expression_text = expression_text.replace('^', '**')
+            
+            # Safely evaluate the expression
+            result = eval(expression_text, {"__builtins__": {}})
+            return result
+        
+        except Exception as e:
+            return f"Error evaluating expression: {e}"
+    
+    def solve_from_image(self, image_path, show_steps=True):
+        """
+        Complete pipeline to solve math problems from images
+        """
+        print(f"Processing image: {image_path}")
+        
+        # Extract text from image
+        extracted_text = self.extract_text_from_image(image_path)
+        
+        if not extracted_text:
+            return "Could not extract text from image"
+        
+        print(f"Extracted text: '{extracted_text}'")
+        
+        # Parse and solve
+        result = self.parse_equation(extracted_text)
+        
+        if show_steps:
+            print(f"Solution: {result}")
+        
+        return {
+            'extracted_text': extracted_text,
+            'solution': result
+        }
+    
+    def solve_from_camera(self):
+        """
+        Capture image from camera and solve math problems in real-time
+        """
+        cap = cv2.VideoCapture(0)
+        
+        print("Press 'c' to capture and solve, 'q' to quit")
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            cv2.imshow('Math Solver Camera', frame)
+            
+            key = cv2.waitKey(1) & 0xFF
+            
+            if key == ord('c'):
+                # Save current frame
+                cv2.imwrite('temp_math_image.jpg', frame)
+                
+                # Solve from the captured image
+                result = self.solve_from_image('temp_math_image.jpg')
+                print(f"Solution: {result}")
+                
+                # Clean up temporary file
+                if os.path.exists('temp_math_image.jpg'):
+                    os.remove('temp_math_image.jpg')
+            
+            elif key == ord('q'):
+                break
+        
+        cap.release()
+        cv2.destroyAllWindows()
+    
+    def display_solution_steps(self, equation_text):
+        """
+        Display step-by-step solution
+        """
+        try:
+            if '=' in equation_text:
+                left, right = equation_text.split('=', 1)
+                left_expr = parse_expr(left)
+                right_expr = parse_expr(right)
+                equation = left_expr - right_expr
+                
+                print(f"Original equation: {left} = {right}")
+                print(f"Rearranged: {equation} = 0")
+                
+                variables = equation.free_symbols
+                for var in variables:
+                    steps = solve(equation, var, dict=True)
+                    print(f"Solving for {var}:")
+                    for i, step in enumerate(steps):
+                        print(f"  Solution {i+1}: {var} = {step[var]}")
+            else:
+                expr = parse_expr(equation_text)
+                print(f"Original expression: {expr}")
+                print(f"Simplified: {simplify(expr)}")
+                print(f"Expanded: {expand(expr)}")
+                print(f"Factored: {factor(expr)}")
+        
+        except Exception as e:
+            print(f"Error displaying steps: {e}")
+
+# Example usage and testing
+if __name__ == "__main__":
+    solver = MathSolver()
+    
+    # Test with sample equations
+    test_equations = [
+        "2*x + 5 = 15",
+        "x^2 - 4 = 0",
+        "3*x + 2*y = 10",
+        "(x + 2)^2",
+        "2 + 3 * 4"
+    ]
+    
+    print("Testing with sample equations:")
+    for eq in test_equations:
+        print(f"\nEquation: {eq}")
+        result = solver.parse_equation(eq)
+        print(f"Result: {result}")
+    
+    # Uncomment to test with image files
+    # Replace 'math_image.jpg' with your actual image path
+    # result = solver.solve_from_image('math_image.jpg')
+    # print(f"Image solution: {result}")
+    
+    # Uncomment to test with camera
+    # solver.solve_from_camera()
